@@ -1,0 +1,373 @@
+---
+title: "R for LiDAR"
+author: "Derek Van Berkel"
+date: "9/23/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### lidR
+```lidR``` is an R package for visualization of LiDAR data. The package is open source and compatible with the geospatial R ecosystem (i.e. raster, sp, sf, rgdal etc.). 
+
+
+### Data and software
+ - [LiDAR Data for Ann Arbor](https://drive.google.com/file/d/1RvkOZa-7lU6mKy9pHRS29hGO2-EzB2C-/view?usp=sharing)
+
+```{r}
+## Dependencies
+library(sf)
+library(raster)
+library(rgdal)
+library(raster)
+library(tmap)
+library(tmaptools)
+library(lidR)
+library(RStoolbox)
+library(ForestTools)
+library(ggplot2)
+```
+LiDAR data is often accompanied by spatial metadata that indicates the location of the subset of the point clouds. We can read this in to visualize these locations and create a interactive map of these areas. *note: if you were only able to download the Ann Arbor dataset, not all area as depicted in the entire Washtenaw data depicted  
+```{r}
+#load the spatial data
+lidar_data <-st_read("C:/Data/LiDAR_Nichols/Washtenaw_Index.shp")
+lidar_data <- st_transform(lidar_data, 4326)
+#st_bbox(lidar_data)
+
+```
+This is our traditional way to visualize the data. Because it is a static map, it is difficult to visualize the labels of the LiDAR data   
+```{r}
+library(ggspatial)
+
+ggplot(lidar_data) +
+  annotation_map_tile("cartolight") +
+  geom_sf(size = 0.1, colour = "gray", fill = NA) 
+# + geom_sf_label(aes(label = Name))
+```
+As an alternative, we can make an interactive map to help us target a specific LiDAR dataset. We will use the package ```library(leaflet)``` to develop this map. leaflet comes with functionality for adding base maps and applying different attributes (e.g. variables) to your own sf data. Here we add the data using the ```leaflet``` function, a base map using ```addTiles()``` and different attribute to the map using ```addPolygons()```. After running this code an interactive map appears that will help in identifying the label of the LiDAR data that you can use for this exercise
+```{r}
+library(leaflet)
+leaflet(lidar_data) %>% 
+  addTiles() %>%  
+  addPolygons(color = "#444444", weight = 1, smoothFactor = 0.5,
+    opacity = 1.0, fillOpacity = 0.05,
+    fillColor =NA,
+    highlightOptions = highlightOptions(color = "blue", weight = 2,
+      bringToFront = TRUE),
+            popup = paste("LiDAR Index: ", lidar_data$Name))
+
+```
+
+
+#### Las or Laz
+LiDAR sensors record a number of pieces of data including positional data in three dimensions (X,Y,Z), the intensity for each point, the position of each point in the return sequence, or the beam incidence angle of each point. 
+
+The LAS format is specifically designed to store active remote sensing data in a standardized way. LAS files are large files as they are not compressed. The LAZ format is the standard compression scheme, because it is free and open-source.
+
+The function ```readLAS()``` reads a LAS or LAZ file and returns an object of class LAS. A LAS file is made of two parts: 1) a header that stores summary information about its content including the bounding box of the file, coordinate reference system, and point format; and 2) the payload - i.e. the point cloud itself.```readLAS()``` reads and creates an object that contains both the header and the payload.
+
+
+Modify the directory for reading in a test las file
+```{r}
+las <- readLAS("/Users/journgalvan/Documents/umich/classes/AdvGeovis/data/lab2/Pointclouds_AnnArbor/292282.las")
+```
+
+We have to set the coordinate reference systems (CRS), as this data did not include it in the original files. This information is most likely available in the metadata(I was able to find it there - "NAD83(HARN) / Michigan South (ft) + NAVD88 height - Geoid12B"). This can be set with the ```espg()``` function. I identified the CRS/espg number by using [http://epsg.io](http://epsg.io)
+```{r}
+###"NAD83(HARN) / Michigan South (ft) + NAVD88 height - Geoid12B
+CRS("+init=epsg:8705")
+epsg(las) <- 8705
+summary(las)
+
+```
+
+It is a good idea to visualize the data before an processing. A simply way to render a point cloud is the function ```plot()```. This is an interactive window and I encourage you to explore the data. Why might there be missing data?
+```{r}
+plot(las)
+```
+
+We can also plot the intensity parameter to help explore the data. Intensity is the recorded return strength of the laser, which is a measure between 1-256. This number varies with the composition of the surface reflecting the beam. 
+
+
+```{r}
+plot(las, color = "Intensity", bg = "gray")
+```
+
+The trim parameter enables trimming of values when outliers break the color palette range. For example, intensity often contains large outliers. The palette range would be too large and most of the values will be considered as “very low”, so everything will appear in the same color. Using trim as an outlier threshold enable to print every value higher than trim using the same color.
+
+```{r}
+plot(las, color = "Intensity", trim = 1800, bg ="gray")
+```
+
+
+## Terrain modeling
+### DTM
+The fastest way to analyze a LiDAR point cloud is to use binning and create a raster map. Since there are numerous points per one cell, we can use a finer resolution (notice the overwrite flag). This will result in a meter resolution map
+
+A Digital Terrain Model (DTM) represents the elevations of the reflective surfaces of trees, buildings, and other features elevated above the “Bare Earth”. We can use binning to obtain the DSM.
+
+### Interpolation methods
+## KNN
+The ```grid_terrain()``` function interpolates the ground points and creates a rasterized digital terrain model. ```res``` indicates the resolution that you want to interpolate. Here I am choosing 3, which is approximately 1 meter as the projection is in feet. ```knnidw()``` is the method of interpolation - this uses a k-nearest neighbour (KNN) - ```k=``` approach with an inverse-distance weighting (IDW) - ```p=```. KNN assumes that similar things exist in close proximity. It interpolates based on the nearest ```k=``` geographic points. You can look at the average density of points to guess how many points are needed per grid.  Finally, ```keep_lowest=``` forces the original lowest ground point of each pixel (if it exists) to be chosen instead of the interpolated values.
+```{r}
+dtm1 <- grid_terrain(las, res = 1, knnidw(k = 6, p = 2), keep_lowest = FALSE)
+```
+
+We can plot this using tm_shape(), which allows you to view it in 2D and ```plot_dtm3d()```, which enable 3D viewing manipulation 
+```{r}
+tm_shape(dtm1)+
+tm_raster(style= "cont", palette=get_brewer_pal("Greys", plot=FALSE))+
+tm_layout(legend.outside = TRUE)
+##plot 3d
+plot_dtm3d(dtm1)
+```
+
+```ggplot()``` allows us to examine the distribution of values. What might account for this distribution? 
+```{r}
+ggplot(dtm1) +
+    geom_histogram(aes(Z)) +
+    xlab("DTM Elevation Value (m)") +
+    ggtitle("Distribution of DTM Values")
+```
+
+We can also interpolate based on tin triangulation. This method employs a linear interpolation across a triangle surface. There are usually few cells outside the convex hull, determined by the ground points at the very edge of the dataset that cannot be interpolated with a triangulation. Extrapolation is done using knnidw.
+```{r}
+dtm2 <- grid_terrain(las, res = 3, algorithm = tin())
+plot(dtm2)
+
+tm_shape(dtm2)+
+tm_raster(style= "cont", palette=get_brewer_pal("Greys", plot=FALSE))+
+tm_layout(legend.outside = TRUE)
+##plot 3d
+plot_dtm3d(dtm2)
+
+```
+
+### kriging
+Interpolation can also be done by universal ```kriging()```. This method combines the KNN approach with the kriging approach. For each point of interest the terrain is kriged using the k-nearest neighbour ground points. This method is more difficult to manipulate but it is also the most advanced method for interpolating spatial data. Kriging estimates a surface from the given point values related to their distance. It predicts the value of a given point by computing a weighted average of the known values of the function in the neighborhood of the point. More info [here](https://en.wikipedia.org/wiki/Kriging#:~:text=From%20Wikipedia%2C%20the%20free%20encyclopedia,process%20governed%20by%20prior%20covariances.) Here we simply specify the methods. The default is to consider the 10 k-nearest neighbours for the interpolation. 
+
+Let's try another region for developing a different terrain models and subsequent surface models. The Nichols Arboretum in Ann Arbor is a popular spot for walking and enjoying the outdoors
+```{r}
+lasArb <- readLAS("C:/Data/LiDAR_Nichols/Pointclouds_AnnArbor/297285.las")
+###NAD83(HARN) / Michigan South
+CRS("+init=epsg:8705")
+epsg(lasArb) <- 8705
+summary(lasArb)
+
+```
+
+```{r}
+###5 meter resolution
+dtm3 = grid_terrain(lasArb, res = 16.4042, algorithm = kriging(k = 40))
+
+## plot 2d
+library(tmap)
+tm_shape(dtm3)+
+tm_raster(style= "cont", palette=get_brewer_pal("Greys", plot=FALSE))+
+tm_layout(legend.outside = TRUE)
+##plot 3d
+plot_dtm3d(dtm3)
+```
+
+
+If you want to write this raster to file you can use ```writeRaster()```
+```{r}
+#writeRaster(dtm, "D:/lidar_out/dtm.tif")
+```
+
+
+### Rendering shaded DTM
+We can also develop different terrain models base on the point cloud. Generating hillshade layers is relatively straight forward and is done using functions from the raster package. The terrain() and hillShade() functions can be combined to take the DTM raster layers as input and return a hillshade raster:
+```{r}
+library(raster)
+slope <- terrain(dtm3, opt='slope')
+aspect <- terrain(dtm3, opt='aspect')
+hs <- hillShade(slope, aspect, angle=45, direction=315)
+
+tm_shape(hs)+
+tm_raster(style= "cont", palette=get_brewer_pal("Greys", plot=FALSE))+
+tm_layout(legend.outside = TRUE)
+```
+
+
+The ```rayshader()``` package also provides interesting tools to generate shaded DTM.
+```{r}
+#install.packages("rayshader")
+library(rayshader)
+elmat <- raster_to_matrix(dtm3)
+#> [1] "Dimensions of matrix are: 284x284."
+map <- elmat %>%
+  sphere_shade(texture = "imhof1", progbar = FALSE) %>%
+  add_water(detect_water(elmat), color = "imhof1") %>%
+  add_shadow(ray_shade(elmat, progbar = FALSE), 0.5) %>%
+  add_shadow(ambient_shade(elmat, progbar = FALSE), 0)
+```
+
+
+Here are the plotting options for this hillshade layer
+```{r}
+plot_map(map)
+plot_3d(map, elmat, zscale = 5, windowsize = c(800, 800))
+```
+
+To normalize points using a DTM we first need to create the DTM itself. For this we use the grid_terrain() function (see section 4). For this example we chose to use a grid resolution of 1 m and to use the knnidw() algorithm with default parameters.
+
+Here we subtract the digital terrain model (DTM) from LiDAR data to create a dataset normalized with the ground at 0
+```{r}
+lasnorm <- lasnormalize(lasArb, dtm3, na.rm = TRUE)
+plot(lasnorm)
+```
+
+
+### DSM
+A Digital Surface Model (DSM) represents the elevations of the reflective surfaces of trees, buildings, and other features elevated above the “Bare Earth”. We can use binning to obtain the DSM.
+
+## Creating A DSM
+If we simply want the top of all features, we can used ```grid_canopy()```. The algorithm uses the 'local maximum' or the highest points. The resulting surface model can contain empty pixels and these 'holes' can be filled by interpolation. Internally, the interpolation is based on the same method used in the function grid_terrain. The pit-free algorithm is based on the computation of a set of classical triangulations at different heights. The subcircle tweak replaces each point with 8 points around the original one. This allows for virtual 'emulation' of the fact that a lidar point is not a point as such, but more realistically a disc. This tweak densifies the point cloud and the resulting canopy model is smoother and contains fewer 'pits' and empty pixels.
+```{r, message=FALSE}
+dsm <- grid_canopy(lasArb, res = 3, pitfree(c(0,2,5,10,15), c(0, 1)))
+```
+
+We can plot this in 2D or make a 3D interactive map like the dtm to explore the surface of trees, building and other features ea 
+```{r}
+tm_shape(dsm)+
+tm_raster(style= "cont", palette=get_brewer_pal("Greys", plot=FALSE))+
+tm_layout(legend.outside = TRUE)
+
+plot_dtm3d(dsm)
+```
+
+
+### Classification
+id_terrain**  The algorithm uses the points classified as "ground" and "water (Classification = 2 and 9 according to LAS file format specifications) to compute the interpolation.
+LiDAR data is often accompanied by classification values based on the returns. This can helps in classification of the data. The following figure provide the 'codes' for the different classes of the points in the LiDAR point cloud:
+
+| Classification value 	| Meaning 	|
+|---	|-----------|
+| 0 	| Never classified 	|
+| 1 	| Unassigned 	|
+| 2 	| Ground 	|
+| 3 	| Low Vegetation 	|
+| 4 	| Medium Vegetation 	|
+| 5 	| High Vegetation 	|
+| 6 	| Building 	|
+| 7 	| Low Point 	|
+| 8 	| Reserved* 	|
+| 9 	| Water 	|
+| 10 	| Rail 	|
+| 11 	| Road Surface 	|
+| 12 	| Reserved* 	|
+| 13 	| Wire - Guard (Shield) 	|
+| 14 	| Wire - Conductor (Phase) 	|
+| 15 	| Transmission Tower 	|
+| 16 	| Wire-Structure Connector (Insulator) 	|
+| 17 	| Bridge Deck 	|
+| 18 	| High Noise 	|
+| 19-63 	| Reserved 	|
+| 64-255 	| User Definable 	|
+
+
+Ideally, we can use the classification values for defining the environment and landscape. Unfortunately, LiDAR data rarely comes classified i.e. Never classified. Here we will examine the green area adjacent to the "Big House" using both ITD and ITS.
+```{r}
+lasBH <- readLAS("C:/Data/LiDAR_Nichols/Pointclouds_AnnArbor/290277.las")
+epsg(lasBH) <- 8705
+
+```
+
+We can examine the classed using the classification variable
+```{r}
+ground <- filter_poi(lasBH, Classification != 2L)
+#veg <- filter_poi(lasBH, Classification == 3L | Classification == 4L | Classification == 5L)
+plot(ground, color = "Classification", bg = "white", size = 3)
+
+```
+
+Optionally you can add classes using a raster to [classify the cloud](https://www.rdocumentation.org/packages/lidR/versions/1.6.1/topics/lasclassify)
+
+
+## Optional Tree height operation 
+We use the ```ForestTools``` to calculate the tree tops based on local elevation differences.Here we are going to use the test data provided with the package as there are no issues with it (e.g. projected nicely, classes are present) 
+```{r}
+# Attach the 'ForestTools' and 'raster' libraries
+library(ForestTools)
+library(raster)
+# Load sample canopy height model
+data("kootenayCHM")
+```
+
+We can view a canopy height model (CHM) using the plot function. The test data already has a CHM, which was can be obtained using ```grid_canopy()```.  This calculates the height above ground of the canopy (cell values).
+```{r}
+# Remove plot margins (optional)
+par(mar = rep(0.5, 4))
+
+# Plot CHM (extra optional arguments remove labels and tick marks from the plot)
+# chm can be obtained using chm <- dsm - dtm
+plot(kootenayCHM, xlab = "", ylab = "", xaxt='n', yaxt = 'n')
+```
+
+Our first step is to define a function that will delimit a dynamic window size for classifying tree. This function takes the CHM cell value (i.e.: the height of the canopy above ground at that location) and returns the radius of the search window. This is a simple linear equation, which for instance, would return a radius of 1.1 meters for a height of 10 meters. You can define your own function for this. Remember the units of the projections.
+```{r}
+lin <- function(x){x * 0.05 + 0.6}
+```
+
+Dominant treetops can be detected using the ```vwf()``` function. To prevent low-lying underbrush or other spurious treetops from being classified, we can set a minHeight argument e.g. 2 m. Any cell with a lower value will not be tagged as a treetop.
+```{r}
+ttops <- vwf(CHM = kootenayCHM, winFun = lin, minHeight = 2)
+```
+
+The ttops object created by vwf contains the spatial coordinates of each detected treetop, as well as two default attributes: height and winRadius. These correspond to the tree’s height above ground and the radius of the moving window where the tree was located. Note that winRadius is not necessarily equivalent to the tree’s crown radius.
+```{r}
+# Get the mean treetop height
+mean(ttops$height)
+```
+
+Forests are often continuous, and dense which makes delimiting them a challenge. Outlining discrete crown shapes from this type of forest is known as canopy segmentation. The treetops classification can be used to outline the crown using the ```mcws()```.
+
+The function takes a minHeight argument that should be a lower value than used in ttops calculation e.g. vwf, as the height above ground of should be detactable.
+```{r}
+# Create crown map
+crowns <- mcws(treetops = ttops, CHM = kootenayCHM, minHeight = 1.5, verbose = FALSE)
+# Plot crowns
+plot(crowns, col = sample(rainbow(50), length(unique(crowns[])), replace = TRUE), legend = FALSE, xlab = "", ylab = "", xaxt='n', yaxt = 'n')
+```
+
+By default, mcws returns a raster, where each crown is given a unique cell value. It may be preferable to store these outlines as polygons. Setting the format argument to “polygons” will convert the rasterized crown map to a set of polygons (a SpatialPolygonsDataFrame). It should be noted, however, that producing crown outlines as polygons requires significantly more processing time and disk space.
+```{r, message=FALSE, warning=FALSE}
+# Create polygon crown map
+crownsPoly <- mcws(treetops = ttops, CHM = kootenayCHM, format = "polygons", minHeight = 1.5, verbose = FALSE)
+
+# Plot CHM
+plot(kootenayCHM, xlab = "", ylab = "", xaxt='n', yaxt = 'n')
+
+# Add crown outlines to the plot
+plot(crownsPoly, border = "blue", lwd = 0.5, add = TRUE)
+```
+
+Assuming that each crown has a roughly circular shape, we can use the crown’s area to compute its average circular diameter.
+```{r}
+# Compute average crown diameter
+crownsPoly[["crownDiameter"]] <- sqrt(crownsPoly[["crownArea"]]/ pi) * 2
+
+# Mean crown diameter
+mean(crownsPoly$crownDiameter)
+```
+
+## Assignment
+1. Our readings this week demonstrate two applications of 3D geovisualizations. In your opinion, what are the benefits and challenges of using 3D. Is 3D and the technology associated with it (e.g immersive environments) here to stay?(1-2 paragraphs)
+
+2. I have introduced you to yet another open source software. In your opnion, what role will open source software play in the future of public and private research? How will it be maintained? (1-2 paragraphs)  
+
+3. Give 3 example that would you make your results discoverable and open to the public?(1-2 paragraphs) 
+
+4. Design and describe your own 3D geovisualization based on the provided data. (1-2 paragraphs)   
+
+
+| Evaluation              | *Highly well-done* 	|*Well-done* 	| *Some deficiencies* 	| *Several deficiencies* 	|
+|--------------------------|-------------|-------------|-------------|-------------|
+| **Cartographic principles** - 20% (title, name, date, north arrow, scale, legend, explanation symbols)  | Elements present and correctly portrayed (100%) 	| Most elements present and correctly portrayed (99-80%) 	| Some elements  (when appropriate) present and correctly portrayed (79-50%) 	| Minimal  information (<50%) 	|
+| **Presentation and  Legibility** - 20% (readable, consistency and ease of understanding, flow of ideas consistent with cognition, clear explanation of content)  	| Highly legible, consistent and easy to  understand (100%) 	| Mostly legible, consistent and easy to   understand (99 -80%) 	| Somewhat legible, consistent and easy to understand (79-50%) 	| Minimally legible, consistent and poorly   understandable (<50%) 	|
+| **Content**  -   20% (relevant, coherent and interesting topic, appropriate subject matter   given the presented information/data, free of bias and error ) 	| Highly relevant coherent, and interesting;   consistent information free of bias and error (100%) 	| Mostly relevant coherent, and interesting;    consistent information free of bias and error (99 -80%) 	| Somewhat relevant coherent, and interesting;   some inconsistencies in information(79-50%) 	| Minimally relevant coherent, and interesting;   inconsistencies in information  (<50%) 	|
+| **Aesthetics**    - 20% (is the map attractive, are there objective elements that are popularly viewed as beautiful)  | Highly attractive/ beautiful (100%) 	| Mostly attractive/ beautiful (99 -80%) 	| Somewhat attractive/beautiful (79-50%) 	| Minimally attractive beautiful (<50%) 	|
+| **Creativity and  persuasiveness**  - 20% (imaginative information/data,   convincing argumentation, presence of sustainability principles) 	| Highly imaginative; convincing of   sustainability  principles (100%) 	| Mostly imaginative; convincing of   sustainability  principles (99   -80%) 	| Somewhat imaginative; less convincing of   sustainability  principles (79-50%) 	| Minimally imaginative; not convincing of   sustainability  principles (<50%)    |
